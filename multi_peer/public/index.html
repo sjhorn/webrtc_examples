@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Multi-Peer Audio Receiver</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    #status { font-size: 20px; font-weight: bold; margin: 15px 0; padding: 10px; background: #e3f2fd; border-left: 4px solid #2196f3; }
+    .peers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }
+    .peer-box { padding: 15px; border: 2px solid #ddd; border-radius: 8px; background: #fafafa; }
+    .peer-box.connected { border-color: #4caf50; background: #e8f5e9; }
+    .peer-box h3 { margin: 0 0 10px 0; }
+    .peer-box .state { font-size: 12px; color: #666; margin-bottom: 10px; }
+    .peer-box .bytes { font-size: 14px; font-weight: bold; color: #2196f3; margin: 10px 0; }
+    .peer-box .messages { font-size: 11px; background: #f3e5f5; padding: 8px; border-radius: 4px; margin-top: 10px; max-height: 60px; overflow-y: auto; }
+    audio { width: 100%; margin-top: 10px; }
+    #log { background: #f5f5f5; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 11px; margin-top: 20px; }
+    .stats { display: flex; gap: 20px; margin: 15px 0; }
+    .stat { padding: 8px 15px; background: #e1bee7; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <h1>Multi-Peer Audio Receiver</h1>
+  <div id="status">Waiting for peers to connect...</div>
+
+  <div class="stats">
+    <div class="stat">Connected Peers: <span id="peerCount">0</span></div>
+    <div class="stat">Total Bytes Received: <span id="totalBytes">0</span></div>
+  </div>
+
+  <div class="peers" id="peersContainer"></div>
+
+  <h3>Event Log</h3>
+  <div id="log"></div>
+
+  <script>
+    const statusDiv = document.getElementById("status");
+    const peersContainer = document.getElementById("peersContainer");
+    const logDiv = document.getElementById("log");
+
+    let ws = null;
+    const peerConnections = new Map(); // peerId -> { pc, dc, bytesReceived }
+    let totalBytesReceived = 0;
+
+    window.setStatus = (msg) => statusDiv.textContent = msg;
+    window.getPeerCount = () => peerConnections.size;
+    window.getTotalBytes = () => totalBytesReceived;
+    window.getPeerBytes = (peerId) => peerConnections.get(peerId)?.bytesReceived || 0;
+
+    function log(msg) {
+      const time = new Date().toLocaleTimeString();
+      logDiv.innerHTML += `[${time}] ${msg}<br>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+      console.log(msg);
+    }
+
+    function updateStats() {
+      document.getElementById("peerCount").textContent = peerConnections.size;
+      document.getElementById("totalBytes").textContent = totalBytesReceived.toLocaleString();
+    }
+
+    function createPeerBox(peerId) {
+      const box = document.createElement("div");
+      box.className = "peer-box";
+      box.id = `peer-${peerId}`;
+      box.innerHTML = `
+        <h3>Peer ${peerId}</h3>
+        <div class="state" id="state-${peerId}">Connecting...</div>
+        <div class="bytes" id="bytes-${peerId}">Bytes: 0</div>
+        <audio id="audio-${peerId}" controls></audio>
+        <div class="messages" id="msg-${peerId}">Messages:</div>
+      `;
+      peersContainer.appendChild(box);
+    }
+
+    function updatePeerState(peerId, state) {
+      const stateEl = document.getElementById(`state-${peerId}`);
+      if (stateEl) stateEl.textContent = state;
+
+      const box = document.getElementById(`peer-${peerId}`);
+      if (box) {
+        box.classList.toggle("connected", state === "connected");
+      }
+    }
+
+    function updatePeerBytes(peerId, bytes) {
+      const bytesEl = document.getElementById(`bytes-${peerId}`);
+      if (bytesEl) bytesEl.textContent = `Bytes: ${bytes.toLocaleString()}`;
+    }
+
+    function addPeerMessage(peerId, msg) {
+      const msgEl = document.getElementById(`msg-${peerId}`);
+      if (msgEl) {
+        msgEl.innerHTML += `<br>${msg}`;
+        msgEl.scrollTop = msgEl.scrollHeight;
+      }
+    }
+
+    // Connect to signaling server
+    ws = new WebSocket(`ws://${location.host}`);
+    ws.onopen = () => {
+      log("WebSocket connected");
+      // Register as receiver
+      ws.send(JSON.stringify({ type: "register", role: "receiver" }));
+    };
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === "peer-joined") {
+        log(`Peer ${msg.peerId} joined`);
+        return;
+      }
+
+      if (msg.type === "peer-left") {
+        log(`Peer ${msg.peerId} left`);
+        removePeer(msg.peerId);
+        return;
+      }
+
+      // WebRTC signaling from peers
+      if (msg.type === "offer") {
+        await handleOffer(msg.from, msg.sdp);
+      } else if (msg.type === "candidate") {
+        await handleCandidate(msg.from, msg.candidate);
+      }
+    };
+
+    async function handleOffer(fromPeerId, sdp) {
+      log(`Received offer from peer ${fromPeerId}`);
+      createPeerBox(fromPeerId);
+
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      const peerData = { pc, dc: null, bytesReceived: 0 };
+      peerConnections.set(fromPeerId, peerData);
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type: "candidate", target: fromPeerId, candidate: e.candidate }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        updatePeerState(fromPeerId, pc.connectionState);
+        log(`Peer ${fromPeerId}: ${pc.connectionState}`);
+        updateStats();
+
+        if (pc.connectionState === "connected") {
+          statusDiv.textContent = `${peerConnections.size} peer(s) connected`;
+        }
+      };
+
+      pc.ondatachannel = (e) => {
+        log(`DataChannel from peer ${fromPeerId}`);
+        peerData.dc = e.channel;
+        setupDataChannel(fromPeerId, e.channel);
+      };
+
+      pc.ontrack = (e) => {
+        log(`Received audio track from peer ${fromPeerId}`);
+        const audioEl = document.getElementById(`audio-${fromPeerId}`);
+        if (audioEl) {
+          audioEl.srcObject = e.streams[0];
+        }
+
+        // Track bytes received via getStats
+        startBytesTracking(fromPeerId, pc);
+      };
+
+      await pc.setRemoteDescription(sdp);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: "answer", target: fromPeerId, sdp: pc.localDescription }));
+    }
+
+    async function handleCandidate(fromPeerId, candidate) {
+      const peerData = peerConnections.get(fromPeerId);
+      if (peerData && candidate) {
+        await peerData.pc.addIceCandidate(candidate);
+      }
+    }
+
+    function setupDataChannel(peerId, dc) {
+      dc.onopen = () => {
+        log(`DataChannel to peer ${peerId} opened`);
+        addPeerMessage(peerId, "Channel opened");
+      };
+
+      dc.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        addPeerMessage(peerId, `Recv: ${msg.type}`);
+
+        if (msg.type === "audio-complete") {
+          // Peer finished sending, send back the bytes we received
+          const peerData = peerConnections.get(peerId);
+          const bytesReceived = peerData ? peerData.bytesReceived : 0;
+          dc.send(JSON.stringify({
+            type: "bytes-received",
+            bytes: bytesReceived,
+            peerId: peerId
+          }));
+          addPeerMessage(peerId, `Sent: ${bytesReceived} bytes`);
+          log(`Sent bytes-received to peer ${peerId}: ${bytesReceived}`);
+        }
+      };
+
+      dc.onclose = () => {
+        log(`DataChannel to peer ${peerId} closed`);
+      };
+    }
+
+    function startBytesTracking(peerId, pc) {
+      const interval = setInterval(async () => {
+        if (pc.connectionState !== "connected") {
+          clearInterval(interval);
+          return;
+        }
+
+        const stats = await pc.getStats();
+        let bytesReceived = 0;
+
+        stats.forEach(report => {
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            bytesReceived = report.bytesReceived || 0;
+          }
+        });
+
+        const peerData = peerConnections.get(peerId);
+        if (peerData) {
+          const oldBytes = peerData.bytesReceived;
+          peerData.bytesReceived = bytesReceived;
+          totalBytesReceived += (bytesReceived - oldBytes);
+          updatePeerBytes(peerId, bytesReceived);
+          updateStats();
+        }
+      }, 500);
+    }
+
+    function removePeer(peerId) {
+      const peerData = peerConnections.get(peerId);
+      if (peerData) {
+        peerData.pc.close();
+        peerConnections.delete(peerId);
+      }
+      const box = document.getElementById(`peer-${peerId}`);
+      if (box) box.remove();
+      updateStats();
+    }
+  </script>
+</body>
+</html>

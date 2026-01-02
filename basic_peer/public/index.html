@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Basic Peer Connection</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    #status { margin: 10px 0; padding: 10px; background: #f0f0f0; }
+    #log { font-family: monospace; font-size: 12px; white-space: pre-wrap; background: #f8f8f8; padding: 10px; max-height: 300px; overflow-y: auto; }
+    button { margin: 5px; padding: 10px 20px; }
+  </style>
+</head>
+<body>
+  <h1>Basic Peer Connection</h1>
+  <div id="status">Connecting to signaling server...</div>
+  <div>
+    <button id="startBtn" disabled>Start Call</button>
+    <button id="sendBtn" disabled>Send Message</button>
+  </div>
+  <div id="log"></div>
+
+  <script>
+    const status = document.getElementById("status");
+    const log = document.getElementById("log");
+    const startBtn = document.getElementById("startBtn");
+    const sendBtn = document.getElementById("sendBtn");
+
+    let socket, pc, dataChannel;
+    let peerId = null;
+    let isInitiator = false;
+
+    function addLog(msg) {
+      const time = new Date().toISOString().substr(11, 12);
+      log.textContent += `[${time}] ${msg}\n`;
+      log.scrollTop = log.scrollHeight;
+      console.log("PEER:", msg);
+    }
+
+    async function createPeerConnection() {
+      pc = new RTCPeerConnection({ iceServers: [] });
+
+      pc.onicecandidate = ({ candidate }) => {
+        if (candidate) {
+          addLog(`ICE candidate: ${candidate.candidate.substr(0, 50)}...`);
+          socket.send(JSON.stringify({ type: "candidate", candidate }));
+        } else {
+          addLog("ICE gathering complete");
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        addLog(`ICE state: ${pc.iceConnectionState}`);
+        if (pc.iceConnectionState === "connected") {
+          status.textContent = `Peer ${peerId}: Connected!`;
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        addLog(`Connection state: ${pc.connectionState}`);
+      };
+
+      pc.ondatachannel = (e) => {
+        addLog(`Received data channel: ${e.channel.label}`);
+        setupDataChannel(e.channel);
+      };
+    }
+
+    function setupDataChannel(channel) {
+      dataChannel = channel;
+      channel.onopen = () => {
+        addLog(`Data channel open: ${channel.label}`);
+        sendBtn.disabled = false;
+        status.textContent = `Peer ${peerId}: Data channel open!`;
+      };
+      channel.onmessage = (e) => {
+        addLog(`Received: ${e.data}`);
+      };
+      channel.onclose = () => {
+        addLog(`Data channel closed`);
+        sendBtn.disabled = true;
+      };
+    }
+
+    async function startCall() {
+      addLog("Starting call as initiator...");
+      isInitiator = true;
+
+      await createPeerConnection();
+
+      // Create data channel
+      const channel = pc.createDataChannel("test");
+      addLog(`Created data channel: ${channel.label}`);
+      setupDataChannel(channel);
+
+      // Create and send offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      addLog(`Created offer, sending...`);
+      socket.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
+    }
+
+    async function handleOffer(sdp) {
+      addLog("Received offer, creating answer...");
+
+      await createPeerConnection();
+      await pc.setRemoteDescription({ type: "offer", sdp });
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      addLog(`Created answer, sending...`);
+      socket.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+    }
+
+    async function handleAnswer(sdp) {
+      addLog("Received answer");
+      await pc.setRemoteDescription({ type: "answer", sdp });
+    }
+
+    async function handleCandidate(candidate) {
+      if (pc && candidate) {
+        await pc.addIceCandidate(candidate);
+        addLog(`Added remote ICE candidate`);
+      }
+    }
+
+    // Connect to signaling server
+    socket = new WebSocket(`ws://${location.host}`);
+
+    socket.onopen = () => {
+      addLog("WebSocket connected");
+    };
+
+    socket.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      switch (msg.type) {
+        case "id":
+          peerId = msg.peerId;
+          status.textContent = `Peer ${peerId}: Connected to signaling server`;
+          addLog(`Assigned peer ID: ${peerId}`);
+          if (peerId === 1) {
+            startBtn.disabled = false;
+            addLog("You are the first peer. Click 'Start Call' when peer 2 joins.");
+          } else {
+            addLog("Waiting for peer 1 to start the call...");
+          }
+          break;
+
+        case "offer":
+          await handleOffer(msg.sdp);
+          break;
+
+        case "answer":
+          await handleAnswer(msg.sdp);
+          break;
+
+        case "candidate":
+          await handleCandidate(msg.candidate);
+          break;
+      }
+    };
+
+    socket.onerror = (e) => {
+      addLog(`WebSocket error: ${e}`);
+      status.textContent = "WebSocket error";
+    };
+
+    socket.onclose = () => {
+      addLog("WebSocket closed");
+      status.textContent = "Disconnected";
+    };
+
+    startBtn.onclick = startCall;
+    sendBtn.onclick = () => {
+      if (dataChannel && dataChannel.readyState === "open") {
+        const msg = `Hello from peer ${peerId} at ${new Date().toISOString()}`;
+        dataChannel.send(msg);
+        addLog(`Sent: ${msg}`);
+      }
+    };
+  </script>
+</body>
+</html>

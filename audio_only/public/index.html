@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Audio Stream</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .progress-container {
+      width: 300px;
+      height: 8px;
+      background: #ddd;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+    .progress-bar {
+      height: 100%;
+      background: #4CAF50;
+      border-radius: 4px;
+      width: 0%;
+      transition: width 0.1s;
+    }
+    .time-display {
+      font-family: monospace;
+      margin: 5px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Audio Stream</h1>
+  <audio id="audio" controls></audio>
+  <div class="progress-container">
+    <div class="progress-bar" id="progress"></div>
+  </div>
+  <div class="time-display" id="time">0:00 / 0:00</div>
+  <div id="status">Connecting...</div>
+
+  <script>
+    const status = document.getElementById("status");
+    const audio = document.getElementById("audio");
+    const progress = document.getElementById("progress");
+    const timeDisplay = document.getElementById("time");
+
+    let socket;
+    let streamEnded = false;
+    let isPlaying = false;
+    let duration = 0;
+    let startTime = 0;
+    let progressInterval = null;
+
+    function formatTime(seconds) {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    function updateProgress() {
+      if (!startTime || !duration) return;
+      const elapsed = (Date.now() - startTime) / 1000;
+      const pct = Math.min(100, (elapsed / duration) * 100);
+      progress.style.width = pct + '%';
+      timeDisplay.textContent = `${formatTime(elapsed)} / ${formatTime(duration)}`;
+    }
+
+    function startProgressTimer() {
+      stopProgressTimer();
+      startTime = Date.now();
+      progressInterval = setInterval(updateProgress, 100);
+    }
+
+    function stopProgressTimer() {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+    }
+
+    function resetProgress() {
+      progress.style.width = '0%';
+      timeDisplay.textContent = `0:00 / ${formatTime(duration)}`;
+    }
+
+    // Listen to audio play event
+    audio.addEventListener("play", () => {
+      if (!isPlaying && socket && socket.readyState === WebSocket.OPEN) {
+        console.log("Play clicked, sending play command");
+        socket.send(JSON.stringify({ type: "play" }));
+        status.textContent = "Starting...";
+        streamEnded = false;
+        isPlaying = true;
+      }
+    });
+
+    // Listen to audio pause event
+    audio.addEventListener("pause", () => {
+      if (!streamEnded && socket && socket.readyState === WebSocket.OPEN) {
+        console.log("Pause clicked");
+        socket.send(JSON.stringify({ type: "pause" }));
+        status.textContent = "Paused";
+        isPlaying = false;
+        stopProgressTimer();
+      }
+    });
+
+    (async () => {
+      socket = new WebSocket(`ws://${location.host}`);
+      await new Promise((r) => (socket.onopen = r));
+      status.textContent = "WebSocket connected, waiting for offer...";
+
+      const offer = await new Promise(
+        (r) => (socket.onmessage = (ev) => r(JSON.parse(ev.data)))
+      );
+      console.log("Received offer");
+
+      const pc = new RTCPeerConnection({ iceServers: [] });
+
+      pc.onicecandidate = ({ candidate }) => {
+        if (!candidate) {
+          socket.send(JSON.stringify({
+            type: "answer",
+            sdp: pc.localDescription.sdp
+          }));
+          console.log("Sent answer");
+        }
+      };
+
+      let mediaStream;
+      pc.ontrack = (e) => {
+        console.log("Track received:", e.track.kind);
+        status.textContent = "Ready - press play";
+        mediaStream = e.streams[0];
+        audio.srcObject = mediaStream;
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log("ICE state:", pc.iceConnectionState);
+      };
+
+      socket.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "started") {
+          console.log("Server confirmed stream started, duration:", msg.duration);
+          duration = msg.duration;
+          audio.srcObject = null;
+          audio.srcObject = mediaStream;
+          audio.play().catch(e => console.log("play error:", e));
+          status.textContent = "Playing...";
+          startProgressTimer();
+        } else if (msg.type === "ended") {
+          streamEnded = true;
+          isPlaying = false;
+          stopProgressTimer();
+          audio.pause();
+          progress.style.width = '100%';
+          timeDisplay.textContent = `${formatTime(duration)} / ${formatTime(duration)}`;
+          status.textContent = "Ended - press play to restart";
+        }
+      };
+
+      await pc.setRemoteDescription(offer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+    })();
+  </script>
+</body>
+</html>

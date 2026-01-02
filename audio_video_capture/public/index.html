@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Audio/Video Capture</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .videos { display: flex; gap: 20px; margin: 20px 0; }
+    video { width: 320px; height: 240px; background: #000; }
+    .video-container { text-align: center; }
+    .video-container label { display: block; margin-bottom: 5px; font-weight: bold; }
+    #status { margin: 10px 0; padding: 10px; background: #f0f0f0; }
+    #log { font-family: monospace; font-size: 12px; white-space: pre-wrap; background: #f8f8f8; padding: 10px; max-height: 200px; overflow-y: auto; }
+    button { margin: 5px; padding: 10px 20px; }
+    button:disabled { opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <h1>Audio/Video Capture</h1>
+  <div id="status">Connecting to signaling server...</div>
+
+  <div class="videos">
+    <div class="video-container">
+      <label>Local (Camera)</label>
+      <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div class="video-container">
+      <label>Remote (From Peer)</label>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+  </div>
+
+  <div>
+    <button id="captureBtn" disabled>Capture Camera</button>
+    <button id="callBtn" disabled>Start Call</button>
+  </div>
+  <div id="log"></div>
+
+  <script>
+    const status = document.getElementById("status");
+    const log = document.getElementById("log");
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const captureBtn = document.getElementById("captureBtn");
+    const callBtn = document.getElementById("callBtn");
+
+    let socket, pc, localStream;
+    let peerId = null;
+
+    function addLog(msg) {
+      const time = new Date().toISOString().substr(11, 12);
+      log.textContent += `[${time}] ${msg}\n`;
+      log.scrollTop = log.scrollHeight;
+      console.log("PEER:", msg);
+    }
+
+    async function captureMedia() {
+      try {
+        addLog("Requesting camera and microphone...");
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 320, height: 240 },
+          audio: true
+        });
+        localVideo.srcObject = localStream;
+        addLog(`Captured: ${localStream.getVideoTracks().length} video, ${localStream.getAudioTracks().length} audio`);
+        captureBtn.disabled = true;
+        callBtn.disabled = false;
+        status.textContent = `Peer ${peerId}: Camera captured - ready to call`;
+      } catch (e) {
+        addLog(`Capture error: ${e.message}`);
+      }
+    }
+
+    async function createPeerConnection() {
+      pc = new RTCPeerConnection({ iceServers: [] });
+
+      // Add local tracks to connection
+      if (localStream) {
+        for (const track of localStream.getTracks()) {
+          pc.addTrack(track, localStream);
+          addLog(`Added local track: ${track.kind}`);
+        }
+      }
+
+      pc.onicecandidate = ({ candidate }) => {
+        if (candidate) {
+          addLog(`ICE candidate: ${candidate.candidate.substr(0, 50)}...`);
+          socket.send(JSON.stringify({ type: "candidate", candidate }));
+        } else {
+          addLog("ICE gathering complete");
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        addLog(`ICE state: ${pc.iceConnectionState}`);
+        if (pc.iceConnectionState === "connected") {
+          status.textContent = `Peer ${peerId}: Connected!`;
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        addLog(`Connection state: ${pc.connectionState}`);
+      };
+
+      pc.ontrack = (e) => {
+        addLog(`Received remote track: ${e.track.kind}`);
+        if (remoteVideo.srcObject !== e.streams[0]) {
+          remoteVideo.srcObject = e.streams[0];
+          addLog("Set remote video stream");
+        }
+      };
+    }
+
+    async function startCall() {
+      addLog("Starting call as initiator...");
+      callBtn.disabled = true;
+
+      await createPeerConnection();
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      addLog("Created and sent offer");
+      socket.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
+    }
+
+    async function handleOffer(sdp) {
+      addLog("Received offer, creating answer...");
+
+      await createPeerConnection();
+      await pc.setRemoteDescription({ type: "offer", sdp });
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      addLog("Created and sent answer");
+      socket.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+    }
+
+    async function handleAnswer(sdp) {
+      addLog("Received answer");
+      await pc.setRemoteDescription({ type: "answer", sdp });
+    }
+
+    async function handleCandidate(candidate) {
+      if (pc && candidate) {
+        await pc.addIceCandidate(candidate);
+        addLog("Added remote ICE candidate");
+      }
+    }
+
+    // Connect to signaling server
+    socket = new WebSocket(`ws://${location.host}`);
+
+    socket.onopen = () => {
+      addLog("WebSocket connected");
+    };
+
+    socket.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      switch (msg.type) {
+        case "id":
+          peerId = msg.peerId;
+          status.textContent = `Peer ${peerId}: Connected - capture camera first`;
+          addLog(`Assigned peer ID: ${peerId}`);
+          captureBtn.disabled = false;
+          break;
+
+        case "offer":
+          // Auto-capture if not already done
+          if (!localStream) {
+            await captureMedia();
+          }
+          await handleOffer(msg.sdp);
+          break;
+
+        case "answer":
+          await handleAnswer(msg.sdp);
+          break;
+
+        case "candidate":
+          await handleCandidate(msg.candidate);
+          break;
+      }
+    };
+
+    socket.onerror = (e) => {
+      addLog(`WebSocket error`);
+      status.textContent = "WebSocket error";
+    };
+
+    socket.onclose = () => {
+      addLog("WebSocket closed");
+      status.textContent = "Disconnected";
+    };
+
+    captureBtn.onclick = captureMedia;
+    callBtn.onclick = startCall;
+  </script>
+</body>
+</html>

@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Network Interruptions Test</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .videos { display: flex; gap: 20px; margin: 20px 0; }
+    video { width: 280px; height: 210px; background: #000; }
+    #status { font-size: 24px; font-weight: bold; margin: 20px 0; padding: 15px; background: #e3f2fd; border-left: 4px solid #2196f3; }
+    .states { display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap; }
+    .state-box { padding: 10px; border-radius: 5px; min-width: 150px; }
+    .state-box h4 { margin: 0 0 5px 0; font-size: 12px; }
+    .state-box .value { font-size: 16px; font-weight: bold; }
+    .new { background: #e0e0e0; }
+    .checking { background: #fff9c4; }
+    .connecting { background: #fff9c4; }
+    .connected { background: #c8e6c9; }
+    .disconnected { background: #ffccbc; }
+    .failed { background: #ffcdd2; }
+    .closed { background: #cfd8dc; }
+    .stable { background: #c8e6c9; }
+    .gathering { background: #fff9c4; }
+    .complete { background: #c8e6c9; }
+    #log { background: #f5f5f5; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 11px; }
+    .datachannel { margin: 20px 0; padding: 15px; background: #f3e5f5; border-radius: 5px; }
+    .datachannel h4 { margin: 0 0 10px 0; }
+    .messages { display: flex; gap: 20px; }
+    .msg-box { flex: 1; }
+    .msg-box h5 { margin: 0 0 5px 0; font-size: 12px; }
+    .msg-list { background: #fff; padding: 10px; height: 80px; overflow-y: auto; font-family: monospace; font-size: 11px; border: 1px solid #ddd; }
+    .stats { display: flex; gap: 20px; margin-top: 10px; font-size: 14px; }
+    .stat { padding: 5px 10px; background: #e1bee7; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Network Interruptions Test</h1>
+  <div id="status">Waiting to connect...</div>
+  <p>Peer ID: <span id="peerId">-</span></p>
+
+  <div class="states">
+    <div class="state-box" id="connStateBox">
+      <h4>Connection</h4>
+      <div class="value" id="connState">new</div>
+    </div>
+    <div class="state-box" id="iceStateBox">
+      <h4>ICE Connection</h4>
+      <div class="value" id="iceState">new</div>
+    </div>
+    <div class="state-box" id="iceGatherBox">
+      <h4>ICE Gathering</h4>
+      <div class="value" id="iceGatherState">new</div>
+    </div>
+    <div class="state-box" id="signalingBox">
+      <h4>Signaling</h4>
+      <div class="value" id="signalingState">stable</div>
+    </div>
+    <div class="state-box" id="dcStateBox">
+      <h4>DataChannel</h4>
+      <div class="value" id="dcState">none</div>
+    </div>
+  </div>
+
+  <div class="videos">
+    <div>
+      <h3>Local</h3>
+      <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div>
+      <h3>Remote</h3>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+  </div>
+
+  <div class="datachannel">
+    <h4>DataChannel Messages</h4>
+    <div class="messages">
+      <div class="msg-box">
+        <h5>Sent</h5>
+        <div class="msg-list" id="sentMessages"></div>
+      </div>
+      <div class="msg-box">
+        <h5>Received</h5>
+        <div class="msg-list" id="receivedMessages"></div>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat">Sent: <span id="sentCount">0</span></div>
+      <div class="stat">Received: <span id="receivedCount">0</span></div>
+      <div class="stat">Failed: <span id="failedCount">0</span></div>
+    </div>
+  </div>
+
+  <h3>Event Log</h3>
+  <div id="log"></div>
+
+  <script>
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const statusDiv = document.getElementById("status");
+    const logDiv = document.getElementById("log");
+    const sentMessagesDiv = document.getElementById("sentMessages");
+    const receivedMessagesDiv = document.getElementById("receivedMessages");
+
+    let pc = null;
+    let ws = null;
+    let myPeerId = null;
+    let localStream = null;
+    let dataChannel = null;
+    let sentCount = 0;
+    let receivedCount = 0;
+    let failedCount = 0;
+    let messageInterval = null;
+
+    window.setStatus = (msg) => statusDiv.textContent = msg;
+    window.getConnectionState = () => pc ? pc.connectionState : "no-pc";
+    window.getIceConnectionState = () => pc ? pc.iceConnectionState : "no-pc";
+    window.getDataChannelState = () => dataChannel ? dataChannel.readyState : "none";
+    window.getSentCount = () => sentCount;
+    window.getReceivedCount = () => receivedCount;
+    window.getFailedCount = () => failedCount;
+
+    function log(msg) {
+      const time = new Date().toLocaleTimeString();
+      logDiv.innerHTML += `[${time}] ${msg}<br>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+      console.log(msg);
+    }
+
+    function addSentMessage(msg) {
+      sentMessagesDiv.innerHTML += `${msg}<br>`;
+      sentMessagesDiv.scrollTop = sentMessagesDiv.scrollHeight;
+    }
+
+    function addReceivedMessage(msg) {
+      receivedMessagesDiv.innerHTML += `${msg}<br>`;
+      receivedMessagesDiv.scrollTop = receivedMessagesDiv.scrollHeight;
+    }
+
+    function updateStats() {
+      document.getElementById("sentCount").textContent = sentCount;
+      document.getElementById("receivedCount").textContent = receivedCount;
+      document.getElementById("failedCount").textContent = failedCount;
+    }
+
+    function updateStateDisplay(elementId, boxId, state) {
+      document.getElementById(elementId).textContent = state;
+      const box = document.getElementById(boxId);
+      box.className = `state-box ${state}`;
+    }
+
+    // Send a message via DataChannel
+    window.sendMessage = (msg) => {
+      if (dataChannel && dataChannel.readyState === "open") {
+        try {
+          dataChannel.send(msg);
+          sentCount++;
+          addSentMessage(msg);
+          updateStats();
+          return true;
+        } catch (e) {
+          failedCount++;
+          updateStats();
+          log(`Send failed: ${e.message}`);
+          return false;
+        }
+      } else {
+        failedCount++;
+        updateStats();
+        log(`Send failed: channel ${dataChannel ? dataChannel.readyState : "null"}`);
+        return false;
+      }
+    };
+
+    // Start periodic messages
+    window.startMessages = (intervalMs = 1000) => {
+      let msgNum = 0;
+      messageInterval = setInterval(() => {
+        window.sendMessage(`msg-${++msgNum}`);
+      }, intervalMs);
+    };
+
+    window.stopMessages = () => {
+      if (messageInterval) {
+        clearInterval(messageInterval);
+        messageInterval = null;
+      }
+    };
+
+    // Connect to signaling server
+    ws = new WebSocket(`ws://${location.host}`);
+    ws.onopen = () => log("WebSocket connected");
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === "id") {
+        myPeerId = msg.peerId;
+        document.getElementById("peerId").textContent = myPeerId;
+        log(`Assigned peer ID: ${myPeerId}`);
+        return;
+      }
+
+      if (msg.type === "offer") {
+        // Create new PC if none exists or if current one is in bad state
+        if (!pc || pc.connectionState === "closed" || pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+          if (pc) {
+            log("Closing old disconnected PC");
+            pc.close();
+            pc = null;
+            // Clear old remote video
+            if (remoteVideo.srcObject) {
+              remoteVideo.srcObject.getTracks().forEach(t => t.stop());
+              remoteVideo.srcObject = null;
+            }
+          }
+          createPeerConnection();
+        }
+        await pc.setRemoteDescription(msg.sdp);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription }));
+      }
+      else if (msg.type === "answer") {
+        await pc.setRemoteDescription(msg.sdp);
+      }
+      else if (msg.type === "candidate") {
+        if (pc && msg.candidate) {
+          await pc.addIceCandidate(msg.candidate);
+        }
+      }
+    };
+
+    function setupDataChannel(channel) {
+      dataChannel = channel;
+
+      channel.onopen = () => {
+        log("DataChannel opened");
+        updateStateDisplay("dcState", "dcStateBox", "open");
+      };
+
+      channel.onclose = () => {
+        log("DataChannel closed");
+        updateStateDisplay("dcState", "dcStateBox", "closed");
+      };
+
+      channel.onerror = (e) => {
+        log(`DataChannel error: ${e.error?.message || "unknown"}`);
+      };
+
+      channel.onmessage = (e) => {
+        receivedCount++;
+        addReceivedMessage(e.data);
+        updateStats();
+      };
+    }
+
+    function createPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        log(`connectionState: ${state}`);
+        updateStateDisplay("connState", "connStateBox", state);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        log(`iceConnectionState: ${state}`);
+        updateStateDisplay("iceState", "iceStateBox", state);
+      };
+
+      pc.onicegatheringstatechange = () => {
+        const state = pc.iceGatheringState;
+        updateStateDisplay("iceGatherState", "iceGatherBox", state);
+      };
+
+      pc.onsignalingstatechange = () => {
+        const state = pc.signalingState;
+        updateStateDisplay("signalingState", "signalingBox", state);
+      };
+
+      pc.ondatachannel = (e) => {
+        log("Received DataChannel");
+        setupDataChannel(e.channel);
+      };
+
+      pc.ontrack = (e) => {
+        log(`Received ${e.track.kind} track (readyState: ${e.track.readyState})`);
+
+        // Create fresh stream or clear old ended tracks
+        if (!remoteVideo.srcObject) {
+          remoteVideo.srcObject = new MediaStream();
+        }
+
+        const stream = remoteVideo.srcObject;
+
+        // Remove any ended tracks of same kind
+        const existingTracks = e.track.kind === "video" ? stream.getVideoTracks() : stream.getAudioTracks();
+        existingTracks.forEach(t => {
+          if (t.readyState === "ended" || t.id !== e.track.id) {
+            log(`Removing old ${t.kind} track`);
+            stream.removeTrack(t);
+          }
+        });
+
+        // Add new track
+        stream.addTrack(e.track);
+
+        // Force video element to update
+        remoteVideo.srcObject = stream;
+        remoteVideo.play().catch(() => {});
+      };
+
+      log("Created RTCPeerConnection");
+    }
+
+    window.startCall = async () => {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      log("Got local media stream");
+      localVideo.srcObject = localStream;
+
+      createPeerConnection();
+
+      // Create DataChannel
+      const channel = pc.createDataChannel("messages", { ordered: true });
+      setupDataChannel(channel);
+      log("Created DataChannel");
+
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription }));
+      log("Sent offer");
+    };
+
+    window.restartIce = async () => {
+      if (pc) {
+        log("Triggering ICE restart...");
+        const offer = await pc.createOffer({ iceRestart: true });
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription }));
+        log("Sent ICE restart offer");
+      }
+    };
+
+    window.closeConnection = () => {
+      if (pc) {
+        pc.close();
+        pc = null;
+        dataChannel = null;
+        // Clear remote video
+        if (remoteVideo.srcObject) {
+          remoteVideo.srcObject.getTracks().forEach(t => t.stop());
+          remoteVideo.srcObject = null;
+        }
+        log("Connection closed");
+        updateStateDisplay("connState", "connStateBox", "closed");
+        updateStateDisplay("iceState", "iceStateBox", "closed");
+        updateStateDisplay("dcState", "dcStateBox", "closed");
+      }
+    };
+
+    window.reconnect = async () => {
+      log("Reconnecting...");
+
+      // Get fresh media stream
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+      log("Got fresh media stream");
+
+      // Create new peer connection
+      createPeerConnection();
+
+      // Create new DataChannel
+      const channel = pc.createDataChannel("messages", { ordered: true });
+      setupDataChannel(channel);
+
+      // Add fresh tracks
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription }));
+      log("Sent reconnect offer");
+    };
+
+    // Pause/resume video (simulates media interruption)
+    window.pauseVideo = () => {
+      if (localStream) {
+        localStream.getVideoTracks().forEach(t => t.enabled = false);
+        log("Video paused (track disabled)");
+      }
+    };
+
+    window.resumeVideo = () => {
+      if (localStream) {
+        localStream.getVideoTracks().forEach(t => t.enabled = true);
+        log("Video resumed (track enabled)");
+      }
+    };
+  </script>
+</body>
+</html>

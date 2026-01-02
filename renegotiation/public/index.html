@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Renegotiation Test</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    .videos { display: flex; gap: 20px; margin: 20px 0; }
+    video { width: 320px; height: 240px; background: #000; }
+    .controls { margin: 20px 0; }
+    button { padding: 10px 20px; margin-right: 10px; margin-bottom: 10px; }
+    button:disabled { opacity: 0.5; }
+    #log { background: #f0f0f0; padding: 10px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+    .stats { display: flex; gap: 40px; margin: 20px 0; }
+    .stat-box { padding: 10px; background: #e0e0e0; border-radius: 5px; }
+    .stat-box h4 { margin: 0 0 10px 0; }
+    #status { font-size: 24px; font-weight: bold; color: #333; margin: 20px 0; padding: 15px; background: #fffde7; border-left: 4px solid #ffc107; }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Renegotiation Test</h1>
+  <div id="status">Waiting to start...</div>
+  <p>Peer ID: <span id="peerId">-</span> | Connection: <span id="connState">new</span></p>
+
+  <div class="videos">
+    <div>
+      <h3>Local</h3>
+      <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div>
+      <h3>Remote</h3>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat-box">
+      <h4>Local Tracks Sent</h4>
+      <div>Audio: <span id="localAudioCount">0</span></div>
+      <div>Video: <span id="localVideoCount">0</span></div>
+    </div>
+    <div class="stat-box">
+      <h4>Remote Tracks Received</h4>
+      <div>Audio: <span id="remoteAudioCount">0</span></div>
+      <div>Video: <span id="remoteVideoCount">0</span></div>
+    </div>
+    <div class="stat-box">
+      <h4>Renegotiations</h4>
+      <div>Count: <span id="renegotiationCount">0</span></div>
+    </div>
+  </div>
+
+  <h3>Event Log</h3>
+  <div id="log"></div>
+
+  <!-- Hidden audio element for second audio track -->
+  <audio id="audio2" src="audio2.wav"></audio>
+
+  <script>
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const peerIdSpan = document.getElementById("peerId");
+    const connStateSpan = document.getElementById("connState");
+    const statusDiv = document.getElementById("status");
+    const audio2Element = document.getElementById("audio2");
+    const logDiv = document.getElementById("log");
+
+    let pc = null;
+    let ws = null;
+    let myPeerId = null;
+    let localStream = null;
+    let videoSender = null;
+    let audioSender = null;
+    let audio2Sender = null;
+    let renegotiationCount = 0;
+    let isNegotiating = false;
+
+    // Expose functions for Playwright
+    window.setStatus = (msg) => {
+      statusDiv.textContent = msg;
+    };
+
+    window.startVideoOnly = async () => {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      log("Got local video stream");
+      createPeerConnection();
+      const videoTrack = localStream.getVideoTracks()[0];
+      videoSender = pc.addTrack(videoTrack, localStream);
+      log("Added video track");
+      localVideo.srcObject = localStream;
+      updateStats();
+    };
+
+    window.addAudio = async () => {
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioTrack = audioStream.getAudioTracks()[0];
+      log("Got local audio stream");
+      localStream.addTrack(audioTrack);
+      audioSender = pc.addTrack(audioTrack, localStream);
+      log("Added audio track (renegotiation)");
+      updateStats();
+    };
+
+    window.addAudio2 = async () => {
+      audio2Element.currentTime = 0;
+      audio2Element.play();
+      const audio2Stream = audio2Element.captureStream();
+      const audio2Track = audio2Stream.getAudioTracks()[0];
+      log("Got second audio stream from audio2.wav");
+      audio2Sender = pc.addTrack(audio2Track, audio2Stream);
+      log("Added audio track 2 (renegotiation)");
+      updateStats();
+    };
+
+    window.removeAudio2 = () => {
+      if (audio2Sender) {
+        pc.removeTrack(audio2Sender);
+        audio2Element.pause();
+        audio2Sender = null;
+        log("Removed audio track 2 (renegotiation)");
+        updateStats();
+      }
+    };
+
+    let savedVideoTrack = null;
+
+    window.removeVideo = () => {
+      if (videoSender && videoSender.track) {
+        savedVideoTrack = videoSender.track;
+        // Don't stop the track - just null the sender so video continues playing
+        videoSender.replaceTrack(null);
+        log("Removed video track (nulled sender, track still running)");
+        updateStats();
+      }
+    };
+
+    window.addVideo = async () => {
+      let videoTrack;
+      if (savedVideoTrack && savedVideoTrack.readyState === "live") {
+        // Reuse the saved track so video continues from where it was
+        videoTrack = savedVideoTrack;
+        log("Reusing existing video track");
+        savedVideoTrack = null;
+      } else {
+        const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        videoTrack = videoStream.getVideoTracks()[0];
+        log("Got new video stream");
+        localStream.addTrack(videoTrack);
+      }
+      localVideo.srcObject = localStream;
+
+      if (videoSender) {
+        await videoSender.replaceTrack(videoTrack);
+        log("Replaced video track on existing sender");
+      } else {
+        videoSender = pc.addTrack(videoTrack, localStream);
+        log("Added video track (renegotiation)");
+      }
+      updateStats();
+    };
+
+    function log(msg) {
+      const time = new Date().toLocaleTimeString();
+      logDiv.innerHTML += `[${time}] ${msg}<br>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+      console.log(msg);
+    }
+
+    function updateStats() {
+      let localAudio = 0, localVideo = 0;
+      if (pc) {
+        pc.getSenders().forEach(s => {
+          if (s.track) {
+            if (s.track.kind === "audio") localAudio++;
+            if (s.track.kind === "video") localVideo++;
+          }
+        });
+      }
+      document.getElementById("localAudioCount").textContent = localAudio;
+      document.getElementById("localVideoCount").textContent = localVideo;
+
+      let remoteAudio = 0, remoteVideo = 0;
+      if (pc) {
+        pc.getReceivers().forEach(r => {
+          if (r.track) {
+            if (r.track.kind === "audio") remoteAudio++;
+            if (r.track.kind === "video") remoteVideo++;
+          }
+        });
+      }
+      document.getElementById("remoteAudioCount").textContent = remoteAudio;
+      document.getElementById("remoteVideoCount").textContent = remoteVideo;
+      document.getElementById("renegotiationCount").textContent = renegotiationCount;
+    }
+
+    ws = new WebSocket(`ws://${location.host}`);
+    ws.onopen = () => log("WebSocket connected");
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === "id") {
+        myPeerId = msg.peerId;
+        peerIdSpan.textContent = myPeerId;
+        log(`Assigned peer ID: ${myPeerId}`);
+        return;
+      }
+
+      log(`Received ${msg.type} from peer ${msg.from}`);
+
+      if (msg.type === "offer") {
+        if (!pc) createPeerConnection();
+        await pc.setRemoteDescription(msg.sdp);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription }));
+      }
+      else if (msg.type === "answer") {
+        await pc.setRemoteDescription(msg.sdp);
+        isNegotiating = false;
+      }
+      else if (msg.type === "candidate") {
+        if (pc && msg.candidate) {
+          await pc.addIceCandidate(msg.candidate);
+        }
+      }
+    };
+
+    function createPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        connStateSpan.textContent = pc.connectionState;
+        log(`Connection state: ${pc.connectionState}`);
+        updateStats();
+      };
+
+      pc.onnegotiationneeded = async () => {
+        log("negotiationneeded event fired");
+        renegotiationCount++;
+        updateStats();
+
+        if (isNegotiating) {
+          log("Already negotiating, skipping...");
+          return;
+        }
+
+        try {
+          isNegotiating = true;
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription }));
+        } catch (err) {
+          log(`Negotiation error: ${err.message}`);
+          isNegotiating = false;
+        }
+      };
+
+      pc.ontrack = (e) => {
+        log(`Received ${e.track.kind} track (readyState: ${e.track.readyState})`);
+
+        if (!remoteVideo.srcObject) {
+          remoteVideo.srcObject = new MediaStream();
+        }
+        const stream = remoteVideo.srcObject;
+
+        // For video: remove ended tracks and reassign srcObject to force refresh
+        if (e.track.kind === "video") {
+          stream.getVideoTracks().forEach(t => {
+            log(`Removing old video track (readyState: ${t.readyState})`);
+            stream.removeTrack(t);
+          });
+          stream.addTrack(e.track);
+          // Force video element to recognize new track
+          remoteVideo.srcObject = stream;
+          remoteVideo.play().catch(() => {});
+        } else {
+          stream.addTrack(e.track);
+        }
+
+        updateStats();
+      };
+
+      log("Created RTCPeerConnection");
+    }
+
+    setInterval(updateStats, 1000);
+  </script>
+</body>
+</html>

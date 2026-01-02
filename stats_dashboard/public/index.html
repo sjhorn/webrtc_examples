@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Stats Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; background: #f5f5f5; margin: 0; }
+    h1 { margin: 0 0 20px 0; color: #333; }
+    #status { font-size: 18px; font-weight: bold; padding: 12px 20px; background: #e3f2fd; border-left: 4px solid #2196f3; margin-bottom: 20px; }
+
+    .layout { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+
+    .videos { display: flex; flex-direction: column; gap: 15px; }
+    .video-box { background: #000; border-radius: 8px; overflow: hidden; }
+    .video-box h3 { margin: 0; padding: 8px 12px; background: #333; color: #fff; font-size: 14px; }
+    video { width: 100%; display: block; }
+
+    .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; }
+
+    .stat-card { background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow: hidden; }
+    .stat-card h3 { margin: 0; padding: 12px 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; font-size: 14px; }
+    .stat-card.video h3 { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+    .stat-card.audio h3 { background: linear-gradient(135deg, #ee0979 0%, #ff6a00 100%); }
+    .stat-card.network h3 { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+    .stat-card.ice h3 { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+
+    .stat-content { padding: 15px; }
+    .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: #666; font-size: 13px; }
+    .stat-value { font-weight: 600; font-size: 14px; color: #333; }
+    .stat-value.good { color: #4caf50; }
+    .stat-value.warn { color: #ff9800; }
+    .stat-value.bad { color: #f44336; }
+
+    .chart-container { height: 80px; margin-top: 10px; background: #f9f9f9; border-radius: 4px; position: relative; overflow: hidden; }
+    .chart-bar { position: absolute; bottom: 0; width: 4px; background: #667eea; margin-right: 1px; transition: height 0.3s; }
+
+    #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; font-family: 'Monaco', monospace; font-size: 11px; height: 150px; overflow-y: auto; margin-top: 20px; }
+    .log-time { color: #6a9955; }
+    .log-type { color: #569cd6; }
+
+    .controls { margin-bottom: 20px; display: flex; gap: 10px; }
+    button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }
+    button.primary { background: #2196f3; color: #fff; }
+    button.secondary { background: #e0e0e0; color: #333; }
+    button:hover { opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Stats Dashboard</h1>
+  <div id="status">Waiting to connect...</div>
+
+  <div class="controls">
+    <button class="primary" onclick="startCall()">Start Call</button>
+    <button class="secondary" onclick="toggleStats()">Pause Stats</button>
+  </div>
+
+  <div class="layout">
+    <div class="videos">
+      <div class="video-box">
+        <h3>Local Video</h3>
+        <video id="localVideo" autoplay muted playsinline></video>
+      </div>
+      <div class="video-box">
+        <h3>Remote Video</h3>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <div class="dashboard">
+      <!-- Connection Stats -->
+      <div class="stat-card">
+        <h3>Connection</h3>
+        <div class="stat-content">
+          <div class="stat-row">
+            <span class="stat-label">State</span>
+            <span class="stat-value" id="connState">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">ICE State</span>
+            <span class="stat-value" id="iceState">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Signaling</span>
+            <span class="stat-value" id="signalingState">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Duration</span>
+            <span class="stat-value" id="duration">0:00</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Outbound Video Stats -->
+      <div class="stat-card video">
+        <h3>Video (Send)</h3>
+        <div class="stat-content">
+          <div class="stat-row">
+            <span class="stat-label">Bitrate</span>
+            <span class="stat-value" id="videoSendBitrate">- kbps</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Frame Rate</span>
+            <span class="stat-value" id="videoSendFps">- fps</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Resolution</span>
+            <span class="stat-value" id="videoSendRes">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Packets Sent</span>
+            <span class="stat-value" id="videoPacketsSent">0</span>
+          </div>
+          <div class="chart-container" id="videoSendChart"></div>
+        </div>
+      </div>
+
+      <!-- Inbound Video Stats -->
+      <div class="stat-card video">
+        <h3>Video (Receive)</h3>
+        <div class="stat-content">
+          <div class="stat-row">
+            <span class="stat-label">Bitrate</span>
+            <span class="stat-value" id="videoRecvBitrate">- kbps</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Frame Rate</span>
+            <span class="stat-value" id="videoRecvFps">- fps</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Resolution</span>
+            <span class="stat-value" id="videoRecvRes">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Frames Dropped</span>
+            <span class="stat-value" id="framesDropped">0</span>
+          </div>
+          <div class="chart-container" id="videoRecvChart"></div>
+        </div>
+      </div>
+
+      <!-- Audio Stats -->
+      <div class="stat-card audio">
+        <h3>Audio</h3>
+        <div class="stat-content">
+          <div class="stat-row">
+            <span class="stat-label">Send Bitrate</span>
+            <span class="stat-value" id="audioSendBitrate">- kbps</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Recv Bitrate</span>
+            <span class="stat-value" id="audioRecvBitrate">- kbps</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Audio Level (In)</span>
+            <span class="stat-value" id="audioLevel">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Jitter</span>
+            <span class="stat-value" id="audioJitter">- ms</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Network Stats -->
+      <div class="stat-card network">
+        <h3>Network</h3>
+        <div class="stat-content">
+          <div class="stat-row">
+            <span class="stat-label">Round Trip Time</span>
+            <span class="stat-value" id="rtt">- ms</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Packet Loss</span>
+            <span class="stat-value" id="packetLoss">- %</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Jitter Buffer</span>
+            <span class="stat-value" id="jitterBuffer">- ms</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Available Bandwidth</span>
+            <span class="stat-value" id="bandwidth">- kbps</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ICE Candidate Info -->
+      <div class="stat-card ice">
+        <h3>ICE Candidates</h3>
+        <div class="stat-content">
+          <div class="stat-row">
+            <span class="stat-label">Local Type</span>
+            <span class="stat-value" id="localCandidateType">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Remote Type</span>
+            <span class="stat-value" id="remoteCandidateType">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Protocol</span>
+            <span class="stat-value" id="protocol">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Network Type</span>
+            <span class="stat-value" id="networkType">-</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const statusDiv = document.getElementById("status");
+    const logDiv = document.getElementById("log");
+
+    let pc = null;
+    let ws = null;
+    let localStream = null;
+    let statsInterval = null;
+    let statsPaused = false;
+    let startTime = null;
+
+    // Previous values for calculating rates
+    let prevStats = {};
+
+    // Chart data
+    const chartData = {
+      videoSend: [],
+      videoRecv: []
+    };
+
+    window.setStatus = (msg) => statusDiv.textContent = msg;
+    window.getConnectionState = () => pc ? pc.connectionState : "no-pc";
+    window.getStats = () => prevStats;
+
+    function log(msg, type = "info") {
+      const time = new Date().toLocaleTimeString();
+      logDiv.innerHTML += `<span class="log-time">[${time}]</span> <span class="log-type">[${type}]</span> ${msg}<br>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+      console.log(`[${type}] ${msg}`);
+    }
+
+    function formatBitrate(bps) {
+      if (bps > 1000000) return (bps / 1000000).toFixed(2) + " Mbps";
+      if (bps > 1000) return (bps / 1000).toFixed(0) + " kbps";
+      return bps.toFixed(0) + " bps";
+    }
+
+    function formatDuration(ms) {
+      const sec = Math.floor(ms / 1000);
+      const min = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${min}:${s.toString().padStart(2, "0")}`;
+    }
+
+    function updateChart(containerId, data, maxValue) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+
+      container.innerHTML = "";
+      const width = container.offsetWidth;
+      const barCount = Math.floor(width / 5);
+      const slice = data.slice(-barCount);
+
+      slice.forEach((val, i) => {
+        const bar = document.createElement("div");
+        bar.className = "chart-bar";
+        bar.style.left = (i * 5) + "px";
+        bar.style.height = Math.min(100, (val / maxValue) * 100) + "%";
+        container.appendChild(bar);
+      });
+    }
+
+    function getValueClass(value, goodThreshold, warnThreshold, isLowerBetter = false) {
+      if (isLowerBetter) {
+        if (value <= goodThreshold) return "good";
+        if (value <= warnThreshold) return "warn";
+        return "bad";
+      } else {
+        if (value >= goodThreshold) return "good";
+        if (value >= warnThreshold) return "warn";
+        return "bad";
+      }
+    }
+
+    async function updateStats() {
+      if (!pc || statsPaused) return;
+
+      try {
+        const stats = await pc.getStats();
+        const now = Date.now();
+
+        // Update duration
+        if (startTime) {
+          document.getElementById("duration").textContent = formatDuration(now - startTime);
+        }
+
+        // Update connection states
+        document.getElementById("connState").textContent = pc.connectionState;
+        document.getElementById("connState").className = "stat-value " +
+          (pc.connectionState === "connected" ? "good" : pc.connectionState === "connecting" ? "warn" : "");
+        document.getElementById("iceState").textContent = pc.iceConnectionState;
+        document.getElementById("signalingState").textContent = pc.signalingState;
+
+        stats.forEach(report => {
+          // Outbound RTP (video)
+          if (report.type === "outbound-rtp" && report.kind === "video") {
+            const prev = prevStats[report.id] || {};
+            const timeDiff = (now - (prev.timestamp || now)) / 1000;
+
+            if (timeDiff > 0 && prev.bytesSent !== undefined) {
+              const bitrate = ((report.bytesSent - prev.bytesSent) * 8) / timeDiff;
+              document.getElementById("videoSendBitrate").textContent = formatBitrate(bitrate);
+              chartData.videoSend.push(bitrate / 1000);
+              if (chartData.videoSend.length > 60) chartData.videoSend.shift();
+              updateChart("videoSendChart", chartData.videoSend, 2000);
+            }
+
+            if (report.framesPerSecond) {
+              document.getElementById("videoSendFps").textContent = report.framesPerSecond + " fps";
+            }
+            if (report.frameWidth && report.frameHeight) {
+              document.getElementById("videoSendRes").textContent = `${report.frameWidth}x${report.frameHeight}`;
+            }
+            document.getElementById("videoPacketsSent").textContent = report.packetsSent?.toLocaleString() || "0";
+
+            prevStats[report.id] = { bytesSent: report.bytesSent, timestamp: now };
+          }
+
+          // Inbound RTP (video)
+          if (report.type === "inbound-rtp" && report.kind === "video") {
+            const prev = prevStats[report.id] || {};
+            const timeDiff = (now - (prev.timestamp || now)) / 1000;
+
+            if (timeDiff > 0 && prev.bytesReceived !== undefined) {
+              const bitrate = ((report.bytesReceived - prev.bytesReceived) * 8) / timeDiff;
+              document.getElementById("videoRecvBitrate").textContent = formatBitrate(bitrate);
+              chartData.videoRecv.push(bitrate / 1000);
+              if (chartData.videoRecv.length > 60) chartData.videoRecv.shift();
+              updateChart("videoRecvChart", chartData.videoRecv, 2000);
+            }
+
+            if (report.framesPerSecond) {
+              document.getElementById("videoRecvFps").textContent = report.framesPerSecond + " fps";
+            }
+            if (report.frameWidth && report.frameHeight) {
+              document.getElementById("videoRecvRes").textContent = `${report.frameWidth}x${report.frameHeight}`;
+            }
+            document.getElementById("framesDropped").textContent = report.framesDropped?.toLocaleString() || "0";
+
+            // Jitter buffer
+            if (report.jitterBufferDelay && report.jitterBufferEmittedCount) {
+              const jitterBuffer = (report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000;
+              const el = document.getElementById("jitterBuffer");
+              el.textContent = jitterBuffer.toFixed(1) + " ms";
+              el.className = "stat-value " + getValueClass(jitterBuffer, 50, 100, true);
+            }
+
+            prevStats[report.id] = { bytesReceived: report.bytesReceived, timestamp: now };
+          }
+
+          // Outbound RTP (audio)
+          if (report.type === "outbound-rtp" && report.kind === "audio") {
+            const prev = prevStats[report.id] || {};
+            const timeDiff = (now - (prev.timestamp || now)) / 1000;
+
+            if (timeDiff > 0 && prev.bytesSent !== undefined) {
+              const bitrate = ((report.bytesSent - prev.bytesSent) * 8) / timeDiff;
+              document.getElementById("audioSendBitrate").textContent = formatBitrate(bitrate);
+            }
+
+            prevStats[report.id] = { bytesSent: report.bytesSent, timestamp: now };
+          }
+
+          // Inbound RTP (audio)
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            const prev = prevStats[report.id] || {};
+            const timeDiff = (now - (prev.timestamp || now)) / 1000;
+
+            if (timeDiff > 0 && prev.bytesReceived !== undefined) {
+              const bitrate = ((report.bytesReceived - prev.bytesReceived) * 8) / timeDiff;
+              document.getElementById("audioRecvBitrate").textContent = formatBitrate(bitrate);
+            }
+
+            if (report.jitter) {
+              const jitter = report.jitter * 1000;
+              const el = document.getElementById("audioJitter");
+              el.textContent = jitter.toFixed(1) + " ms";
+              el.className = "stat-value " + getValueClass(jitter, 20, 50, true);
+            }
+
+            if (report.audioLevel !== undefined) {
+              const level = Math.round(report.audioLevel * 100);
+              document.getElementById("audioLevel").textContent = level + "%";
+            }
+
+            prevStats[report.id] = { bytesReceived: report.bytesReceived, timestamp: now };
+          }
+
+          // Candidate pair (for RTT, packet loss)
+          if (report.type === "candidate-pair" && report.state === "succeeded") {
+            if (report.currentRoundTripTime) {
+              const rtt = report.currentRoundTripTime * 1000;
+              const el = document.getElementById("rtt");
+              el.textContent = rtt.toFixed(1) + " ms";
+              el.className = "stat-value " + getValueClass(rtt, 50, 150, true);
+            }
+
+            if (report.availableOutgoingBitrate) {
+              document.getElementById("bandwidth").textContent = formatBitrate(report.availableOutgoingBitrate);
+            }
+
+            // Get candidate info
+            const localCandidate = stats.get(report.localCandidateId);
+            const remoteCandidate = stats.get(report.remoteCandidateId);
+
+            if (localCandidate) {
+              document.getElementById("localCandidateType").textContent = localCandidate.candidateType || "-";
+              document.getElementById("protocol").textContent = localCandidate.protocol?.toUpperCase() || "-";
+              document.getElementById("networkType").textContent = localCandidate.networkType || "-";
+            }
+            if (remoteCandidate) {
+              document.getElementById("remoteCandidateType").textContent = remoteCandidate.candidateType || "-";
+            }
+          }
+
+          // Remote inbound for packet loss
+          if (report.type === "remote-inbound-rtp" && report.kind === "video") {
+            if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
+              const total = report.packetsLost + report.packetsReceived;
+              const loss = total > 0 ? (report.packetsLost / total) * 100 : 0;
+              const el = document.getElementById("packetLoss");
+              el.textContent = loss.toFixed(2) + " %";
+              el.className = "stat-value " + getValueClass(loss, 1, 5, true);
+            }
+          }
+        });
+      } catch (err) {
+        log("Stats error: " + err.message, "error");
+      }
+    }
+
+    function toggleStats() {
+      statsPaused = !statsPaused;
+      document.querySelector(".secondary").textContent = statsPaused ? "Resume Stats" : "Pause Stats";
+      log(statsPaused ? "Stats paused" : "Stats resumed", "info");
+    }
+
+    // Connect to signaling server
+    ws = new WebSocket(`ws://${location.host}`);
+    ws.onopen = () => log("WebSocket connected", "ws");
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === "offer") {
+        log("Received offer", "signal");
+        await handleOffer(msg.sdp);
+      } else if (msg.type === "answer") {
+        log("Received answer", "signal");
+        await pc.setRemoteDescription(msg.sdp);
+      } else if (msg.type === "candidate" && msg.candidate) {
+        await pc.addIceCandidate(msg.candidate);
+      }
+    };
+
+    async function handleOffer(sdp) {
+      await setupPeerConnection();
+
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      await pc.setRemoteDescription(sdp);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription }));
+      log("Sent answer", "signal");
+    }
+
+    async function setupPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        log(`Connection: ${pc.connectionState}`, "state");
+        statusDiv.textContent = `Connection: ${pc.connectionState}`;
+
+        if (pc.connectionState === "connected") {
+          startTime = Date.now();
+          statusDiv.textContent = "Connected - Streaming stats...";
+          if (!statsInterval) {
+            statsInterval = setInterval(updateStats, 1000);
+          }
+        }
+      };
+
+      pc.ontrack = (e) => {
+        log(`Received ${e.track.kind} track`, "media");
+        remoteVideo.srcObject = e.streams[0];
+      };
+    }
+
+    window.startCall = async () => {
+      log("Starting call...", "info");
+      statusDiv.textContent = "Starting call...";
+
+      await setupPeerConnection();
+
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      log("Got local media", "media");
+      localVideo.srcObject = localStream;
+
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription }));
+      log("Sent offer", "signal");
+    };
+  </script>
+</body>
+</html>

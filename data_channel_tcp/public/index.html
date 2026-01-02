@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Data Channel - Reliable (TCP-like)</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    #status { margin: 10px 0; padding: 10px; background: #f0f0f0; }
+    .channel-info { background: #e8f5e9; padding: 10px; margin: 10px 0; border-radius: 4px; }
+    #messages { font-family: monospace; font-size: 12px; background: #f8f8f8; padding: 10px; height: 200px; overflow-y: auto; border: 1px solid #ddd; }
+    .sent { color: blue; }
+    .received { color: green; }
+    .system { color: #888; }
+    input[type="text"] { width: 300px; padding: 8px; }
+    button { margin: 5px; padding: 10px 20px; }
+    button:disabled { opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <h1>Data Channel - Reliable (TCP-like)</h1>
+  <div id="status">Connecting to signaling server...</div>
+
+  <div class="channel-info">
+    <strong>Channel Config:</strong> ordered=true, reliable (SCTP retransmits until delivered)
+  </div>
+
+  <div>
+    <button id="connectBtn" disabled>Connect to Peer</button>
+  </div>
+
+  <div style="margin: 20px 0;">
+    <input type="text" id="messageInput" placeholder="Type a message..." disabled>
+    <button id="sendBtn" disabled>Send Text</button>
+    <button id="sendBinaryBtn" disabled>Send Binary</button>
+    <button id="sendBulkBtn" disabled>Send 100 Messages</button>
+  </div>
+
+  <div id="messages"></div>
+
+  <script>
+    const status = document.getElementById("status");
+    const messages = document.getElementById("messages");
+    const messageInput = document.getElementById("messageInput");
+    const connectBtn = document.getElementById("connectBtn");
+    const sendBtn = document.getElementById("sendBtn");
+    const sendBinaryBtn = document.getElementById("sendBinaryBtn");
+    const sendBulkBtn = document.getElementById("sendBulkBtn");
+
+    let socket, pc, dataChannel;
+    let peerId = null;
+    let messageCount = 0;
+    let receivedCount = 0;
+
+    function addMessage(text, type = "system") {
+      const div = document.createElement("div");
+      div.className = type;
+      div.textContent = `[${new Date().toISOString().substr(11, 12)}] ${text}`;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+      console.log("PEER:", text);
+    }
+
+    function enableSending() {
+      messageInput.disabled = false;
+      sendBtn.disabled = false;
+      sendBinaryBtn.disabled = false;
+      sendBulkBtn.disabled = false;
+    }
+
+    function setupDataChannel(channel) {
+      dataChannel = channel;
+
+      channel.onopen = () => {
+        addMessage(`Data channel "${channel.label}" opened (ordered=${channel.ordered}, reliable)`, "system");
+        status.textContent = `Peer ${peerId}: Data channel open!`;
+        enableSending();
+      };
+
+      channel.onmessage = (e) => {
+        receivedCount++;
+        if (e.data instanceof ArrayBuffer) {
+          const arr = new Uint8Array(e.data);
+          addMessage(`Received binary [${arr.length} bytes]: ${Array.from(arr.slice(0, 10)).join(',')}...`, "received");
+        } else {
+          addMessage(`Received: ${e.data}`, "received");
+        }
+      };
+
+      channel.onclose = () => {
+        addMessage("Data channel closed", "system");
+        messageInput.disabled = true;
+        sendBtn.disabled = true;
+        sendBinaryBtn.disabled = true;
+        sendBulkBtn.disabled = true;
+      };
+
+      channel.onerror = (e) => {
+        addMessage(`Data channel error: ${e.error}`, "system");
+      };
+    }
+
+    async function createPeerConnection() {
+      pc = new RTCPeerConnection({ iceServers: [] });
+
+      pc.onicecandidate = ({ candidate }) => {
+        if (candidate) {
+          socket.send(JSON.stringify({ type: "candidate", candidate }));
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        addMessage(`ICE state: ${pc.iceConnectionState}`, "system");
+      };
+
+      pc.ondatachannel = (e) => {
+        addMessage(`Received data channel: ${e.channel.label}`, "system");
+        setupDataChannel(e.channel);
+      };
+    }
+
+    async function connect() {
+      addMessage("Starting connection as initiator...", "system");
+      connectBtn.disabled = true;
+
+      await createPeerConnection();
+
+      // Create RELIABLE data channel (TCP-like)
+      // ordered: true (default) - messages arrive in order
+      // No maxRetransmits/maxPacketLifeTime - SCTP will retransmit until delivered
+      const channel = pc.createDataChannel("reliable-channel", {
+        ordered: true,  // TCP-like: maintain order
+        // No maxRetransmits = reliable delivery
+      });
+      addMessage(`Created data channel: ${channel.label} (ordered=${channel.ordered})`, "system");
+      setupDataChannel(channel);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
+    }
+
+    async function handleOffer(sdp) {
+      addMessage("Received offer, creating answer...", "system");
+      connectBtn.disabled = true;
+
+      await createPeerConnection();
+      await pc.setRemoteDescription({ type: "offer", sdp });
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+    }
+
+    async function handleAnswer(sdp) {
+      await pc.setRemoteDescription({ type: "answer", sdp });
+    }
+
+    async function handleCandidate(candidate) {
+      if (pc && candidate) {
+        await pc.addIceCandidate(candidate);
+      }
+    }
+
+    function sendText() {
+      const text = messageInput.value.trim();
+      if (text && dataChannel && dataChannel.readyState === "open") {
+        dataChannel.send(text);
+        addMessage(`Sent: ${text}`, "sent");
+        messageInput.value = "";
+        messageCount++;
+      }
+    }
+
+    function sendBinary() {
+      if (dataChannel && dataChannel.readyState === "open") {
+        // Send 1KB of binary data
+        const data = new Uint8Array(1024);
+        for (let i = 0; i < data.length; i++) {
+          data[i] = i % 256;
+        }
+        dataChannel.send(data.buffer);
+        addMessage(`Sent binary [${data.length} bytes]`, "sent");
+        messageCount++;
+      }
+    }
+
+    function sendBulk() {
+      if (dataChannel && dataChannel.readyState === "open") {
+        addMessage("Sending 100 numbered messages...", "system");
+        const startTime = Date.now();
+        for (let i = 1; i <= 100; i++) {
+          dataChannel.send(`Message #${i} of 100`);
+          messageCount++;
+        }
+        addMessage(`Sent 100 messages in ${Date.now() - startTime}ms`, "sent");
+      }
+    }
+
+    // Connect to signaling server
+    socket = new WebSocket(`ws://${location.host}`);
+
+    socket.onopen = () => {
+      addMessage("WebSocket connected", "system");
+    };
+
+    socket.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      switch (msg.type) {
+        case "id":
+          peerId = msg.peerId;
+          status.textContent = `Peer ${peerId}: Ready to connect`;
+          addMessage(`Assigned peer ID: ${peerId}`, "system");
+          connectBtn.disabled = false;
+          break;
+        case "offer":
+          await handleOffer(msg.sdp);
+          break;
+        case "answer":
+          await handleAnswer(msg.sdp);
+          break;
+        case "candidate":
+          await handleCandidate(msg.candidate);
+          break;
+      }
+    };
+
+    connectBtn.onclick = connect;
+    sendBtn.onclick = sendText;
+    sendBinaryBtn.onclick = sendBinary;
+    sendBulkBtn.onclick = sendBulk;
+    messageInput.onkeypress = (e) => { if (e.key === "Enter") sendText(); };
+  </script>
+</body>
+</html>
