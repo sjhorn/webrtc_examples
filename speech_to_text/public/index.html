@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Audio STT Demo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    h1 {
+      color: #eee;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .controls {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    button {
+      background: #4a90d9;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 6px;
+      margin: 0 10px;
+    }
+    button:hover {
+      background: #357abd;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 15px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .peer-box {
+      background: #16213e;
+      border: 2px solid #0f3460;
+      border-radius: 8px;
+      padding: 15px;
+      min-height: 150px;
+      display: flex;
+      flex-direction: column;
+    }
+    .peer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .peer-title {
+      color: #eee;
+      font-weight: bold;
+    }
+    .peer-status {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #333;
+      color: #888;
+    }
+    .peer-status.connecting {
+      background: #4a3f00;
+      color: #ffd700;
+    }
+    .peer-status.connected {
+      background: #0a4a0a;
+      color: #4caf50;
+    }
+    .peer-status.streaming {
+      background: #1a237e;
+      color: #64b5f6;
+    }
+    .peer-status.done {
+      background: #1b5e20;
+      color: #81c784;
+    }
+    .peer-status.error {
+      background: #4a0000;
+      color: #ff5252;
+    }
+    .peer-result {
+      color: #ccc;
+      font-size: 14px;
+      flex: 1;
+      overflow-y: auto;
+      word-break: break-word;
+    }
+    .peer-result .final {
+      color: #4caf50;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Audio STT Demo</h1>
+  <div class="controls">
+    <button id="startBtn">Start All Peers</button>
+    <button id="stopBtn" disabled>Stop All</button>
+    <div id="countdown" style="display: none; font-size: 48px; color: #ffd700; margin-top: 20px;"></div>
+  </div>
+  <div class="grid">
+    <div class="peer-box" data-peer="0">
+      <div class="peer-header">
+        <span class="peer-title">Peer 0</span>
+        <span class="peer-status">Ready</span>
+      </div>
+      <div class="peer-result"></div>
+    </div>
+    <div class="peer-box" data-peer="1">
+      <div class="peer-header">
+        <span class="peer-title">Peer 1</span>
+        <span class="peer-status">Ready</span>
+      </div>
+      <div class="peer-result"></div>
+    </div>
+    <div class="peer-box" data-peer="2">
+      <div class="peer-header">
+        <span class="peer-title">Peer 2</span>
+        <span class="peer-status">Ready</span>
+      </div>
+      <div class="peer-result"></div>
+    </div>
+    <div class="peer-box" data-peer="3">
+      <div class="peer-header">
+        <span class="peer-title">Peer 3</span>
+        <span class="peer-status">Ready</span>
+      </div>
+      <div class="peer-result"></div>
+    </div>
+    <div class="peer-box" data-peer="4">
+      <div class="peer-header">
+        <span class="peer-title">Peer 4</span>
+        <span class="peer-status">Ready</span>
+      </div>
+      <div class="peer-result"></div>
+    </div>
+    <div class="peer-box" data-peer="5">
+      <div class="peer-header">
+        <span class="peer-title">Peer 5</span>
+        <span class="peer-status">Ready</span>
+      </div>
+      <div class="peer-result"></div>
+    </div>
+  </div>
+
+  <script>
+    const peers = [];
+    const audioFiles = [
+      '/assets/long2.wav',    // 16s TTS
+      '/assets/long1.wav',    // 11s TTS
+      '/assets/long0.wav',    // 12s TTS
+      '/assets/long3.wav',    // 31s TTS
+      '/assets/long4.wav',    // 33s TTS
+      '/assets/long5.wav'     // 33s TTS
+    ];
+
+    function updateStatus(peerId, status, className) {
+      const box = document.querySelector(`.peer-box[data-peer="${peerId}"]`);
+      const statusEl = box.querySelector('.peer-status');
+      statusEl.textContent = status;
+      statusEl.className = 'peer-status ' + className;
+    }
+
+    function updateResult(peerId, text, isFinal = false) {
+      const box = document.querySelector(`.peer-box[data-peer="${peerId}"]`);
+      const resultEl = box.querySelector('.peer-result');
+
+      if (text === '') {
+        resultEl.textContent = '';
+      } else if (isFinal) {
+        // Final transcription - show in green
+        resultEl.innerHTML = `<span class="final">${text}</span>`;
+        updateStatus(peerId, 'Done', 'done');
+      } else {
+        // Streaming transcription - show accumulated text
+        resultEl.textContent = text;
+      }
+    }
+
+    async function createPeer(peerId) {
+      const peer = { id: peerId, ws: null, pc: null, dc: null, audioSource: null, audioContext: null };
+      updateStatus(peerId, 'Connecting...', 'connecting');
+      peer.ws = new WebSocket('ws://localhost:8080');
+
+      return new Promise((resolve, reject) => {
+        peer.ws.onopen = async () => {
+          try {
+            peer.pc = new RTCPeerConnection({
+              iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+
+            peer.pc.onicecandidate = ({ candidate }) => {
+              if (candidate && peer.ws.readyState === WebSocket.OPEN) {
+                peer.ws.send(JSON.stringify({ type: 'candidate', payload: candidate }));
+              }
+            };
+
+            // Create data channel for receiving transcriptions (browser creates, server receives)
+            peer.dc = peer.pc.createDataChannel('transcriptions');
+            peer.dc.onmessage = (e) => {
+              const { type, text, final } = JSON.parse(e.data);
+              if (type === 'transcription') {
+                updateResult(peerId, text, final);
+              }
+            };
+
+            // Load audio file and create stream
+            const response = await fetch(audioFiles[peerId]);
+            const audioContext = new AudioContext();
+            const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+            const dest = audioContext.createMediaStreamDestination();
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(dest);
+
+            peer.audioSource = source;
+            peer.audioContext = audioContext;
+            peer.pc.addTrack(dest.stream.getAudioTracks()[0], dest.stream);
+
+            // Send offer
+            const offer = await peer.pc.createOffer();
+            await peer.pc.setLocalDescription(offer);
+            peer.ws.send(JSON.stringify({ type: 'offer', payload: offer }));
+
+            updateStatus(peerId, 'Connected', 'connected');
+            resolve(peer);
+          } catch (err) {
+            updateStatus(peerId, 'Error', 'error');
+            updateResult(peerId, err.message);
+            reject(err);
+          }
+        };
+
+        peer.ws.onmessage = async (event) => {
+          const { type, payload } = JSON.parse(event.data);
+
+          switch (type) {
+            case 'answer':
+              await peer.pc.setRemoteDescription(payload);
+              break;
+            case 'candidate':
+              if (payload) {
+                await peer.pc.addIceCandidate(payload);
+              }
+              break;
+          }
+        };
+
+        peer.ws.onerror = (err) => {
+          updateStatus(peerId, 'Error', 'error');
+          updateResult(peerId, 'WebSocket error');
+          reject(err);
+        };
+
+        peer.ws.onclose = () => {
+          if (peer.pc) {
+            peer.pc.close();
+          }
+        };
+      });
+    }
+
+    function startPeer(peer) {
+      updateStatus(peer.id, 'Streaming...', 'streaming');
+      peer.audioSource.start();
+      peer.audioSource.onended = () => {
+        if (peer.ws.readyState === WebSocket.OPEN) {
+          peer.ws.send(JSON.stringify({ type: 'done' }));
+        }
+      };
+    }
+
+    function stopPeer(peer) {
+      try { peer.audioSource?.stop(); } catch (e) {}
+      peer.audioContext?.close();
+      peer.dc?.close();
+      peer.ws?.close();
+      peer.pc?.close();
+    }
+
+    async function showCountdown() {
+      const el = document.getElementById('countdown');
+      el.style.display = 'block';
+      for (let i = 5; i >= 1; i--) {
+        el.textContent = `Meeting starts in ${i}...`;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      el.textContent = 'Starting!';
+      await new Promise(r => setTimeout(r, 500));
+      el.style.display = 'none';
+    }
+
+    document.getElementById('startBtn').onclick = async () => {
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('stopBtn').disabled = false;
+      await showCountdown();
+
+      for (let i = 0; i < 6; i++) {
+        try {
+          const peer = await createPeer(i);
+          peers.push(peer);
+          startPeer(peer);
+          await new Promise(r => setTimeout(r, 500));
+        } catch (err) {
+          console.error('Error starting peer:', err);
+        }
+      }
+    };
+
+    document.getElementById('stopBtn').onclick = () => {
+      peers.forEach(stopPeer);
+      peers.length = 0;
+      for (let i = 0; i < 6; i++) {
+        updateStatus(i, 'Ready', '');
+        updateResult(i, '');
+      }
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+    };
+  </script>
+</body>
+</html>

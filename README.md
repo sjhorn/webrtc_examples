@@ -13,6 +13,7 @@ A collection of WebRTC examples demonstrating various features and patterns, wit
 | [Audio + Video (Unbundled)](#audio-video-unbundled) | Audio and video on separate transports |
 | [Audio/Video Capture](#audio-video-capture) | Capture and display local audio/video streams |
 | [Screen Sharing](#screen-sharing) | Share screen content via WebRTC |
+| [Speech to Text](#speech-to-text) | Stream audio to server for real-time speech-to-text |
 | [DataChannel (TCP-like)](#data-channel-tcp) | Reliable, ordered data channel messaging |
 | [DataChannel (UDP-like)](#data-channel-udp) | Unreliable, unordered data channel for real-time data |
 | [Renegotiation](#renegotiation) | Add/remove tracks mid-call without disconnecting |
@@ -222,6 +223,21 @@ Multiple peers sending audio to a central receiver
 
 ```bash
 cd multi_peer
+./run.sh dart
+```
+
+---
+
+## Speech to Text
+
+**Directory:** `speech_to_text/`
+
+Stream audio from multiple browser clients to server for real-time speech-to-text transcription using Whisper
+
+![Speech to Text](docs/images/speech_to_text.png)
+
+```bash
+cd speech_to_text
 ./run.sh dart
 ```
 
