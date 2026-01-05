@@ -5,5 +5,4 @@ environment:
   sdk: ^3.0.0
 
 dependencies:
-  webrtc_dart:
-    path: /Users/shorn/dev/dart/webrtc_dart
+  webrtc_dart: ^0.25.0

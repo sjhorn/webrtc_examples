@@ -76,9 +76,10 @@ packages:
   webrtc_dart:
     dependency: "direct main"
     description:
-      path: "/Users/shorn/dev/dart/webrtc_dart"
-      relative: false
-    source: path
-    version: "0.22.13"
+      name: webrtc_dart
+      sha256: "18bd23107e113fc3e92c518f5b2394cd5eff0df3a199da0e0a30b6e5efd8b32b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.25.0"
 sdks:
   dart: ">=3.7.0 <4.0.0"
